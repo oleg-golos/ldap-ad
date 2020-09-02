@@ -1,6 +1,6 @@
 ldap-ad
 ==========
-Dynamic Ansible inventory script for Active Directory
+Dynamic Ansible inventory script for Active Directory.
 Modified version of https://github.com/rcanderson23/ldap-ad/
 
 Differences:
