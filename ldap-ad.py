@@ -7,6 +7,8 @@ import json
 import configparser
 import argparse
 import ssl
+from datetime import datetime, timedelta, tzinfo
+from calendar import timegm
 
 parser = argparse.ArgumentParser(
     description='Script to obtain host inventory from AD')
@@ -19,22 +21,25 @@ args = parser.parse_args()
 class ADAnsibleInventory():
 
     def __init__(self):
-        directory = os.path.dirname(os.path.abspath(__file__))
-        configfile = directory + '/ldap-ad.ini'
-        config = configparser.ConfigParser()
-        config.read(configfile)
-        username = config.get('ldap-ad', 'username')
-        password = config.get('ldap-ad', 'password')
-        basedn = config.get('ldap-ad', 'basedn')
-        ldapuri = config.get('ldap-ad', 'ldapuri')
-        port = config.get('ldap-ad', 'port')
-        ca_file = config.get('ldap-ad', 'ca_file')
-        adfilter = "(&(sAMAccountType=805306369))"
+        username = 'domain.local\ad_user'
+        password = 'P@ssw0rd'
+        basedn = 'DC=domain,DC=local'
+        ldapuri = 'DC01.domain.local'
+        port = '636'
+        lastlogondays = 14
+        EPOCH_AS_FILETIME = 116444736000000000  # January 1, 1970 as MS file time
+        HUNDREDS_OF_NANOSECONDS = 10000000
+        timestamp = datetime.now() - timedelta(days=lastlogondays)
+        filetime = EPOCH_AS_FILETIME + (timegm(timestamp.timetuple()) * HUNDREDS_OF_NANOSECONDS)
+        filetime = filetime + (timestamp.microsecond * 10)
+        adfilter = "(&(sAMAccountType=805306369)(operatingSystem=Windows Server*)(lastlogontimestamp>={}))".format(filetime)
+        #print(adfilter)
 
         self.inventory = {"_meta": {"hostvars": {}}}
-        self.ad_connect(ldapuri, username, password, port, ca_file)
+        self.ad_connect(ldapuri, username, password, port)
         self.get_hosts(basedn, adfilter)
         self.org_hosts(basedn)
+        self.add_vars()
         if args.list:
             print(json.dumps(self.inventory, indent=2))
         if args.host is not None:
@@ -43,10 +48,8 @@ class ADAnsibleInventory():
             except Exception:
                 print('{}')
 
-    def ad_connect(self, ldapuri, username, password, port, ca_file):
-        tls_configuration = ldap3.Tls(validate=ssl.CERT_REQUIRED,
-                                      ca_certs_file=ca_file)
-        server = ldap3.Server(ldapuri, use_ssl=True, tls=tls_configuration)
+    def ad_connect(self, ldapuri, username, password, port):
+        server = ldap3.Server(ldapuri)
         conn = ldap3.Connection(server,
                                 auto_bind=True,
                                 user=username,
@@ -57,21 +60,19 @@ class ADAnsibleInventory():
     def get_hosts(self, basedn, adfilter):
         self.conn.search(search_base=basedn,
                          search_filter=adfilter,
-                         attributes=['cn', 'dnshostname'])
+                         attributes=['cn', 'dnshostname','operatingSystem'])
         self.conn.response_to_json
         self.results = self.conn.response
+        #print(self.results)
 
     def org_hosts(self, basedn):
         # Removes CN,OU, and DC and places into a list
-        basedn_list = (re.sub(r"..=", "", basedn)).split(",")
         for computer in self.results:
+            if computer['type'] == "searchResRef":
+                continue
             org_list = (re.sub(r"..=", "", computer['dn'])).split(",")
             # Remove hostname
             del org_list[0]
-
-            # Removes all excess OUs and DC
-            for count in range(0, (len(basedn_list)-1)):
-                del org_list[-1]
 
             # Reverse list so top group is first
             org_list.reverse()
@@ -82,25 +83,28 @@ class ADAnsibleInventory():
                     if orgs == org_range[-1]:
                         self.add_host(org_list[orgs],
                                       computer['attributes']['dNSHostName'])
-                    else:
-                        self.add_group(group=org_list[orgs],
-                                       children=org_list[orgs+1])
+            self.add_group(group="all",
+                                       children=[])
+
 
     def add_host(self, group, host):
+        group = "all"
         host = (''.join(host)).lower()
-        group = (''.join(group)).lower()
         if group not in self.inventory.keys():
-            self.inventory[group] = {'hosts': [], 'children': []}
+            self.inventory[group] = {'hosts': []}
         self.inventory[group]['hosts'].append(host)
 
     def add_group(self, group, children):
-        group = (''.join(group)).lower()
         children = (''.join(children)).lower()
         if group not in self.inventory.keys():
-            self.inventory[group] = {'hosts': [], 'children': []}
-        if children not in self.inventory[group]['children']:
-            self.inventory[group]['children'].append(children)
+            self.inventory[group] = {'hosts': []}
 
+    def add_vars(self):
+        self.inventory['all']['vars'] = {}
+        self.inventory['all']['vars']['ansible_port'] = 5985
+        self.inventory['all']['vars']['ansible_winrm_scheme'] = 'http'
+        self.inventory['all']['vars']['ansible_connection'] = 'winrm'
+        self.inventory['all']['vars']['ansible_winrm_transport'] = 'kerberos'
 
 if __name__ == '__main__':
     ADAnsibleInventory()
